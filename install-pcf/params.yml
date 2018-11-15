@@ -1,0 +1,19 @@
+#Azure Blob Storage Creds
+storage_account_name: <ChangeMe>
+storage_account_key: <ChangeMe>
+
+#Azure PCF Automation container and files 
+pcf_automation_container: <ChangeMe>
+pcf_automation_task_file: <ChangeMe> #file name in the container with pcf-automation task
+pcf_automation_image_file: <ChangeMe> #file name of the image used for pcf-automation
+
+#Azure pivnet obj store and files
+pivnet_container: <ChangeMe> #container for pivnet 
+stemcell_filename: <ChangeMe>
+
+
+
+#pivnet
+pivnet_token: <ChangeMe>
+opsman_major_minor_version: <ChangeMe>
+

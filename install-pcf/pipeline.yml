@@ -1,0 +1,453 @@
+resource_types:
+- name: azure-blobstore
+  type: docker-image
+  source:
+    repository: pcfabr/azure-blobstore-resource
+
+- name: pivnet
+  type: docker-image
+  source:
+    repository: pivotalcf/pivnet-resource
+    tag: latest-final
+
+resources:
+- name: pcf-automation-tasks
+  type: azure-blobstore
+  source:
+    storage_account_name: {{storage_account_name}}
+    storage_account_key: {{storage_account_key}}
+    container: {{pcf_automation_container}}
+    versioned_file: {{pcf_automation_task_file}}  
+
+- name: pcf-automation-image
+  type: azure-blobstore
+  source:
+    storage_account_name: {{storage_account_name}}
+    storage_account_key: {{storage_account_key}}
+    container: {{pcf_automation_container}}
+    versioned_file: {{pcf_automation_image}}  
+
+# - name: installation
+#   type: s3
+#   source:
+#     access_key_id: ((s3.access_key_id))
+#     bucket: ((s3.buckets.installation))
+#     region_name: ((s3.region_name))
+#     secret_access_key: ((s3.secret_access_key))
+#     versioned_file: installation.zip
+
+- name: pivnet-opsmgr
+  type: pivnet
+  check_every: 4h
+  source:
+    api_token: {{pivnet_token}}
+    product_slug: ops-manager
+    product_version: {{opsman_major_minor_version}}
+    sort_by: semver
+
+- name: pivnet-opsmgr
+  type: pivnet
+  check_every: 4h
+  source:
+    api_token: {{pivnet_token}}
+    product_slug: ops-manager
+    product_version: {{opsman_major_minor_version}}
+
+# - name: stemcell
+#   type: azure-blobstore
+#   source:
+#     storage_account_name: ((storage_account_name))
+#     storage_account_key: ((storage_account_key))
+#     container: ((pivnet_blob_container))
+#     versioned_file: ((stemcell_filename))
+
+# - name: pas-product
+#   type: s3
+#   source:
+#     access_key_id: ((s3.access_key_id))
+#     bucket: ((s3.buckets.product))
+#     regexp: cf-(.*).pivotal
+#     region_name: ((s3.region_name))
+#     secret_access_key: ((s3.secret_access_key))
+
+# - name: healthwatch-product
+#   type: s3
+#   source:
+#     access_key_id: ((s3.access_key_id))
+#     bucket: ((s3.buckets.product))
+#     regexp: p-healthwatch-(.*).pivotal
+#     region_name: ((s3.region_name))
+#     secret_access_key: ((s3.secret_access_key))
+
+# configurations
+
+- name: configuration
+  type: git
+  source:
+    private_key: ((configuration.private_key))
+    uri: ((configuration.uri))
+    branch: master
+
+- name: variable
+  type: git
+  source:
+    private_key: ((variable.private_key))
+    uri: ((variable.uri))
+    branch: master
+
+# triggers used to have jobs do something in a timely manner
+
+# - name: one-time-trigger
+#   type: time
+#   source:
+#     interval: 999999h
+
+# - name: daily-trigger
+#   type: time
+#   source:
+#     interval: 24h
+
+jobs:
+- name: install-opsman
+  serial: true
+  serial_groups: [ install ]
+  plan:
+  - aggregate:
+    - get: pcf-automation-image
+      params:
+        unpack: true
+    - get: one-time-trigger
+      trigger: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: opsman-image
+    - get: configuration
+    - get: variable
+  - task: create-vm
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/create-vm.yml
+    input_mapping:
+      image: opsman-image
+      state: configuration
+      config: configuration
+      vars: variable
+    params:
+      VARS_FILES: vars/((foundation))/vars/opsman-vars.yml
+      STATE_FILE: ((foundation))/state/state.yml
+      OPSMAN_CONFIG_FILE: ((foundation))/config/opsman.yml
+    ensure: &make-state-commit
+      do:
+        - task: make-commit
+          image: pcf-automation-image
+          config:
+            platform: linux
+            inputs:
+              - name: generated-state
+              - name: configuration
+            outputs:
+              - name: configuration-commit
+            run:
+              path: bash
+              args:
+                - -c
+                - |
+                  set -eu
+                  git clone configuration configuration-commit
+                  cp generated-state/state.yml configuration-commit/((foundation))/state/state.yml
+                  cd configuration-commit
+                  git add -A
+                  git config --global user.email "bot@example.com"
+                  git config --global user.name "Friendly Neighborhood Bot"
+                  git commit -m 'updated the state file' || true
+        - put: configuration
+          params:
+            repository: configuration-commit
+            rebase: true
+  - task: configure-authentication
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/configure-authentication.yml
+    attempts: 10
+    input_mapping:
+      env: configuration
+      config: configuration
+    params:
+      ENV_FILE: ((foundation))/env/env.yml
+      AUTH_CONFIG_FILE: ((foundation))/config/auth.yml
+  - task: configure-director
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/configure-director.yml
+    input_mapping:
+      config: configuration
+      env: configuration
+      vars: variable
+    params:
+      VARS_FILES: vars/((foundation))/vars/director-vars.yml
+      ENV_FILE: ((foundation))/env/env.yml
+      DIRECTOR_CONFIG_FILE: ((foundation))/config/director.yml
+  - task: apply-director-changes
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/apply-director-changes.yml
+    input_mapping:
+      env: configuration
+    params:
+      ENV_FILE: ((foundation))/env/env.yml
+
+- name: export-installation
+  serial: true
+  plan:
+  - aggregate:
+    - get: daily-trigger
+      trigger: true
+    - get: pcf-automation-image
+      params:
+        unpack: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: configuration
+    - get: variable
+  - task: export-installation
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/export-installation.yml
+    input_mapping:
+      env: configuration
+    params:
+      ENV_FILE: ((foundation))/env/env.yml
+  - put: installation
+    params:
+      file: installation/installation.zip
+
+- name: upgrade-opsman
+  serial: true
+  serial_groups: [ install ]
+  plan:
+  - aggregate:
+    - get: one-time-trigger
+      passed: [ install-opsman ]
+    - get: pcf-automation-image
+      params:
+        unpack: true
+      trigger: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: opsman-image
+    - get: installation
+      passed: [ export-installation ]
+    - get: configuration
+    - get: variable
+  - task: upgrade-opsman
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/upgrade-opsman.yml
+    input_mapping:
+      image: opsman-image
+      state: configuration
+      config: configuration
+      env: configuration
+      vars: variable
+    params:
+      VARS_FILES: vars/((foundation))/vars/opsman-vars.yml
+      ENV_FILE: ((foundation))/env/env.yml
+      OPSMAN_CONFIG_FILE: ((foundation))/config/opsman.yml
+      STATE_FILE: ((foundation))/state/state.yml
+    ensure: *make-state-commit
+  - task: apply-director-changes
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/apply-director-changes.yml
+    input_mapping:
+      env: configuration
+    params:
+      ENV_FILE: ((foundation))/env/env.yml
+
+- name: upload-and-stage-pas
+  serial: true
+  plan:
+  - aggregate:
+    - get: pcf-automation-image
+      params:
+        unpack: true
+      passed:
+      - upgrade-opsman
+      trigger: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: pas-product
+    - get: configuration
+    - get: variable
+  - task: upload-and-stage-product
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/upload-and-stage-product.yml
+    input_mapping:
+      product: pas-product
+      env: configuration
+    params:
+      ENV_FILE: ((foundation))/env/env.yml
+
+- name: configure-pas
+  serial: true
+  plan:
+  - aggregate:
+    - get: pcf-automation-image
+      params:
+        unpack: true
+      passed:
+      - upload-and-stage-pas
+      trigger: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: configuration
+    - get: variable
+  - task: configure-pas
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/configure-product.yml
+    input_mapping:
+      config: configuration
+      env: configuration
+      vars: variable
+    params:
+      CONFIG_FILE: ((foundation))/config/cf.yml
+      VARS_FILES: vars/((foundation))/vars/cf-vars.yml
+      ENV_FILE: ((foundation))/env/env.yml
+
+- name: upload-stemcell
+  serial: true
+  plan:
+  - aggregate:
+    - get: pcf-automation-image
+      params:
+        unpack: true
+      passed:
+      - upgrade-opsman
+      trigger: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: stemcell
+      trigger: true
+    - get: configuration
+    - get: variable
+  - task: upload-stemcell
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/upload-stemcell.yml
+    input_mapping:
+      env: configuration
+    params:
+      ENV_FILE: ((foundation))/env/env.yml
+
+- name: upload-and-stage-healthwatch
+  serial: true
+  plan:
+  - aggregate:
+    - get: pcf-automation-image
+      params:
+        unpack: true
+      passed:
+      - upload-stemcell
+      trigger: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: healthwatch-product
+    - get: configuration
+    - get: variable
+  - task: upload-and-stage-product
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/upload-and-stage-product.yml
+    input_mapping:
+      product: healthwatch-product
+      env: configuration
+    params:
+      ENV_FILE: ((foundation))/env/env.yml
+
+- name: configure-healthwatch
+  serial: true
+  plan:
+  - aggregate:
+    - get: pcf-automation-image
+      params:
+        unpack: true
+      passed:
+      - upload-and-stage-healthwatch
+      trigger: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: configuration
+    - get: variable
+  - task: configure-healthwatch
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/configure-product.yml
+    input_mapping:
+      config: configuration
+      env: configuration
+      vars: variable
+    params:
+      CONFIG_FILE: ((foundation))/config/healthwatch.yml
+      ENV_FILE: ((foundation))/env/env.yml
+
+- name: apply-product-changes
+  serial: true
+  plan:
+  - aggregate:
+    - get: pcf-automation-image
+      params:
+        unpack: true
+      passed:
+      - configure-healthwatch
+      - configure-pas
+      trigger: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: configuration
+    - get: variable
+  - task: apply-product-changes
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/apply-changes.yml
+    input_mapping:
+      env: configuration
+    params:
+      ENV_FILE: ((foundation))/env/env.yml
+
+- name: staged-pas-config
+  plan:
+  - aggregate:
+    - get: pcf-automation-image
+      params:
+        unpack: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: configuration
+    - get: variable
+  - task: staged-config
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/staged-config.yml
+    input_mapping:
+      env: configuration
+    params:
+      PRODUCT_NAME: cf
+      ENV_FILE: ((foundation))/env/env.yml
+
+- name: staged-healthwatch-config
+  plan:
+  - aggregate:
+    - get: pcf-automation-image
+      params:
+        unpack: true
+    - get: pcf-automation-tasks
+      params:
+        unpack: true
+    - get: configuration
+    - get: variable
+  - task: staged-config
+    image: pcf-automation-image
+    file: pcf-automation-tasks/tasks/staged-config.yml
+    input_mapping:
+      env: configuration
+    params:
+      PRODUCT_NAME: p-healthwatch
+      ENV_FILE: ((foundation))/env/env.yml
