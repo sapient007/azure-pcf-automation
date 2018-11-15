@@ -124,46 +124,42 @@ jobs:
     - get: opsman-image
     - get: configuration
     - get: variable
-  - task: create-vm
-    image: pcf-automation-image
-    file: pcf-automation-tasks/tasks/create-vm.yml
-    input_mapping:
-      image: opsman-image
-      state: configuration
-      config: configuration
-      vars: variable
-    params:
-      VARS_FILES: vars/((foundation))/vars/opsman-vars.yml
-      STATE_FILE: ((foundation))/state/state.yml
-      OPSMAN_CONFIG_FILE: ((foundation))/config/opsman.yml
-    ensure: &make-state-commit
-      do:
-        - task: make-commit
-          image: pcf-automation-image
-          config:
-            platform: linux
-            inputs:
-              - name: generated-state
-              - name: configuration
-            outputs:
-              - name: configuration-commit
-            run:
-              path: bash
-              args:
-                - -c
-                - |
-                  set -eu
-                  git clone configuration configuration-commit
-                  cp generated-state/state.yml configuration-commit/((foundation))/state/state.yml
-                  cd configuration-commit
-                  git add -A
-                  git config --global user.email "bot@example.com"
-                  git config --global user.name "Friendly Neighborhood Bot"
-                  git commit -m 'updated the state file' || true
-        - put: configuration
-          params:
-            repository: configuration-commit
-            rebase: true
+  - task: unpack-image-tarball
+    config:
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.25
+      inputs:
+      - name: platform-automation-image
+      outputs:
+      - name: pcf-automation-image
+      platform: linux
+      run:
+        path: bash
+        args:
+        - -c
+        - tar -xf platform-automation-image/*.tgz -C pcf-automation-image
+        
+    - task: unpack-tasks-tarball
+    config:
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.25
+      inputs:
+      - name: platform-automation-tasks
+      outputs:
+      - name: pcf-automation-tasks
+      platform: linux
+      run:
+        path: bash
+        args:
+        - -c
+        - unzip platform-automation-tasks/*.zip -d pcf-automation-tasks
+
   - task: configure-authentication
     image: pcf-automation-image
     file: pcf-automation-tasks/tasks/configure-authentication.yml
